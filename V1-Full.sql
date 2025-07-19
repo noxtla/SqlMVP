@@ -94,3 +94,36 @@ CREATE TRIGGER handle_persons_updated_at BEFORE UPDATE ON persons
 -- Trigger para actualizar automáticamente el campo 'updated_at' en la tabla 'employees'.
 CREATE TRIGGER handle_employees_updated_at BEFORE UPDATE ON employees 
   FOR EACH ROW EXECUTE PROCEDURE moddatetime (updated_at);
+
+
+
+
+
+-- =================================================================
+-- GRUPO 4: TABLA DE LECTURA OPTIMIZADA PARA AUTENTICACIÓN
+-- Propósito: Proporcionar una vista desnormalizada y ultra-rápida
+-- para el proceso de login. Esta es la ÚNICA tabla que la GCF
+-- consultará durante la autenticación. Su contenido se genera y
+-- actualiza automáticamente a través de triggers.
+-- =================================================================
+
+CREATE TABLE auth_users (
+    -- La clave primaria es el número de teléfono, ya que es el identificador de entrada del usuario.
+    phone_number TEXT PRIMARY KEY,
+
+    -- UUIDs para poder, si es necesario, enlazar de vuelta a las tablas originales.
+    employee_uuid UUID NOT NULL,
+    person_uuid UUID NOT NULL,
+    
+    -- Datos desnormalizados para evitar JOINs en tiempo de ejecución.
+    full_name TEXT NOT NULL,
+    birth_date DATE NOT NULL,
+    
+    -- Campos CRÍTICOS para la lógica de negocio, pre-calculados.
+    status_name TEXT NOT NULL,         -- Directamente 'Active' o 'Inactive'.
+    position_name TEXT NOT NULL,       -- Directamente 'Trimmer', 'Manager', etc.
+    is_biometric_enabled BOOLEAN NOT NULL,
+
+    -- Sello de tiempo para saber cuándo se actualizó por última vez este registro.
+    last_synced_at TIMESTAMPTZ NOT NULL
+);
