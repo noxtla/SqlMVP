@@ -219,71 +219,56 @@ WHERE id = 'cdbc0ceb-9228-466b-a114-ea29c3f1d9c8';
 
 
 -- =================================================================
--- PASO 1.1: AÑADIR LA COLUMNA DE IMAGEN SECRETA A `employees`
--- Propósito: Preparamos la tabla principal de empleados para almacenar
--- el identificador de la imagen secreta. Se permite que sea NULL para
--- manejar el caso del primer login (enrollment).
+-- PASO 1: PREPARACIÓN Y LIMPIEZA (CORREGIDO)
+-- Propósito: Eliminar completamente las dependencias antiguas.
 -- =================================================================
 
--- Usamos "IF NOT EXISTS" para que el script se pueda ejecutar de forma segura
--- incluso si la columna ya fue creada en un intento anterior.
-ALTER TABLE public.employees
-ADD COLUMN IF NOT EXISTS security_image_identifier TEXT NULL;
-
-
--- =================================================================
--- PASO 1.2: ELIMINAR LOS OBJETOS DE AUTENTICACIÓN ANTIGUOS
--- Propósito: Para garantizar una refactorización limpia y sin conflictos,
--- eliminamos la tabla `auth_users` y su lógica de sincronización asociada.
--- =================================================================
-
+-- CORRECCIÓN: Usamos DROP TRIGGER IF EXISTS para eliminar el trigger si existe.
 DROP TRIGGER IF EXISTS on_employee_change_sync_auth_user ON public.employees;
-DROP FUNCTION IF EXISTS public.sync_auth_user_from_employee();
-DROP FUNCTION IF EXISTS public.sync_auth_user_from_employee_id(); -- Incluimos esta por si se creó en pruebas
+
+-- Eliminamos la tabla `auth_users` y la función.
 DROP TABLE IF EXISTS public.auth_users;
+DROP FUNCTION IF EXISTS public.sync_auth_user_on_employee_change();
+
+-- Eliminamos la secuencia por si fue creada en un intento anterior.
+DROP SEQUENCE IF EXISTS employee_id_seq;
 
 
 -- =================================================================
--- PASO 1.3: RE-CREAR LA TABLA `auth_users` CON LA ESTRUCTURA FINAL
--- Propósito: Definir la tabla optimizada para el login, centrada en
--- `employee_id` y con todos los campos necesarios para el flujo de
--- autenticación por pasos.
+-- PASO 2: ACTUALIZACIÓN MANUAL DE `employee_id`
+-- (Esta sección no cambia)
+-- =================================================================
+
+UPDATE public.employees e
+SET employee_id = (1000258059 + sub.rn)
+FROM (
+    SELECT id, row_number() OVER (ORDER BY created_at) as rn
+    FROM public.employees
+) as sub
+WHERE e.id = sub.id;
+
+ALTER TABLE public.employees
+ALTER COLUMN employee_id TYPE BIGINT USING (employee_id::bigint);
+
+
+-- =================================================================
+-- PASO 3: RECONSTRUIR `auth_users` Y LÓGICA DE SINCRONIZACIÓN
+-- (Esta sección no cambia)
 -- =================================================================
 
 CREATE TABLE public.auth_users (
-    -- Clave Primaria: El identificador de entrada para el usuario.
-    employee_id TEXT PRIMARY KEY,
-
-    -- UUIDs para enlaces internos y operaciones de escritura.
+    employee_id BIGINT PRIMARY KEY,
     employee_uuid UUID NOT NULL UNIQUE,
     person_uuid UUID NOT NULL,
-
-    -- Datos desnormalizados para evitar JOINs durante el login.
     full_name TEXT NOT NULL,
     birth_date DATE NOT NULL,
-    
-    -- CAMPO CLAVE: Identificador de la imagen de seguridad del usuario.
-    -- Es NULL si el usuario nunca ha completado el primer login.
     security_image_identifier TEXT,
-
-    -- Campos CRÍTICOS para la lógica de negocio, pre-calculados.
     status_name TEXT NOT NULL,
     position_name TEXT NOT NULL,
     is_biometric_enabled BOOLEAN NOT NULL,
-
-    -- Sello de tiempo para auditoría y depuración.
     last_synced_at TIMESTAMPTZ NOT NULL
 );
-
--- Creamos un índice en employee_uuid para búsquedas inversas eficientes si fueran necesarias.
 CREATE INDEX idx_auth_users_employee_uuid ON public.auth_users(employee_uuid);
-
-
--- =================================================================
--- PASO 1.4: CREAR LA FUNCIÓN Y EL TRIGGER DE SINCRONIZACIÓN ACTUALIZADOS
--- Propósito: Definir la lógica que mantendrá la nueva tabla `auth_users`
--- actualizada automáticamente.
--- =================================================================
 
 CREATE OR REPLACE FUNCTION public.sync_auth_user_on_employee_change()
 RETURNS TRIGGER AS $$
@@ -292,68 +277,42 @@ DECLARE
     position_record RECORD;
     status_record RECORD;
 BEGIN
-    -- Obtenemos los registros relacionados de las tablas de catálogo y personas.
     SELECT * INTO person_record FROM public.persons WHERE id = NEW.person_id;
     SELECT name INTO position_record FROM public.positions WHERE id = NEW.position_id;
     SELECT name INTO status_record FROM public.employee_status WHERE id = NEW.status_id;
-
-    -- Usamos INSERT ... ON CONFLICT para manejar la creación y actualización
-    -- de forma atómica, basándonos en la clave primaria `employee_id`.
     INSERT INTO public.auth_users (
-        employee_id,
-        employee_uuid,
-        person_uuid,
-        full_name,
-        birth_date,
-        security_image_identifier, -- Incluimos el nuevo campo.
-        status_name,
-        position_name,
-        is_biometric_enabled,
+        employee_id, employee_uuid, person_uuid, full_name, birth_date,
+        security_image_identifier, status_name, position_name, is_biometric_enabled,
         last_synced_at
     )
     VALUES (
-        NEW.employee_id,
-        NEW.id,
-        NEW.person_id,
-        person_record.full_name,
-        person_record.birth_date,
-        NEW.security_image_identifier, -- Tomamos el valor de la tabla `employees`.
-        status_record.name,
-        position_record.name,
-        NEW.is_biometric_enabled,
-        now()
+        NEW.employee_id, NEW.id, NEW.person_id, person_record.full_name,
+        person_record.birth_date, NEW.security_image_identifier, status_record.name,
+        position_record.name, NEW.is_biometric_enabled, now()
     )
     ON CONFLICT (employee_id)
     DO UPDATE SET
-        employee_uuid = EXCLUDED.employee_uuid,
-        person_uuid = EXCLUDED.person_uuid,
-        full_name = EXCLUDED.full_name,
-        birth_date = EXCLUDED.birth_date,
+        employee_uuid = EXCLUDED.employee_uuid, person_uuid = EXCLUDED.person_uuid,
+        full_name = EXCLUDED.full_name, birth_date = EXCLUDED.birth_date,
         security_image_identifier = EXCLUDED.security_image_identifier,
-        status_name = EXCLUDED.status_name,
-        position_name = EXCLUDED.position_name,
+        status_name = EXCLUDED.status_name, position_name = EXCLUDED.position_name,
         is_biometric_enabled = EXCLUDED.is_biometric_enabled,
         last_synced_at = now();
-
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
--- Creamos el TRIGGER que vincula la función a la tabla 'employees'.
--- Se ejecutará DESPUÉS de cualquier INSERT o UPDATE.
+
+-- =================================================================
+-- PASO 4: VINCULAR TRIGGER Y RE-SINCRONIZAR (CORREGIDO)
+-- =================================================================
+
+-- CORRECCIÓN: Ahora, simplemente creamos el trigger. Ya no hay que "habilitarlo".
 CREATE TRIGGER on_employee_change_sync_auth_user
     AFTER INSERT OR UPDATE ON public.employees
     FOR EACH ROW EXECUTE FUNCTION public.sync_auth_user_on_employee_change();
 
-
--- =================================================================
--- PASO 1.5: RE-SINCRONIZAR TODOS LOS DATOS EXISTENTES
--- Propósito: Poblar la nueva tabla `auth_users` con los datos de todos
--- los empleados que ya existen en el sistema.
--- =================================================================
-
--- "Tocamos" cada fila para forzar la ejecución del trigger, asegurando
--- que la tabla `auth_users` se pueble con la lógica de negocio correcta.
+-- "Tocamos" cada empleado para poblar la nueva tabla `auth_users`.
 UPDATE public.employees SET updated_at = now();
 
 /*Solo para agregar el resumen*/
