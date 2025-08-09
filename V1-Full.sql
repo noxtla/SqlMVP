@@ -355,3 +355,5 @@ CREATE TRIGGER on_employee_change_sync_auth_user
 -- "Tocamos" cada fila para forzar la ejecución del trigger, asegurando
 -- que la tabla `auth_users` se pueble con la lógica de negocio correcta.
 UPDATE public.employees SET updated_at = now();
+
+/*Solo para agregar el resumen*/
